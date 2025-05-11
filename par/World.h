@@ -8,6 +8,7 @@
 #include "Rabbit.h"
 #include "Empty.h"
 #include "Fox.h"
+#include <omp.h>
 
 using namespace std;  
 

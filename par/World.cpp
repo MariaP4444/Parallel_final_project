@@ -5,6 +5,10 @@
 #include <iostream>
 #include <algorithm>
 #include <string>
+#include <omp.h>
+#include <map>
+#include <vector>
+#include <mutex>
 using namespace std;
 
 void World::printWorld() const {
@@ -45,27 +49,64 @@ vector<pair<int, int>> World::getFreeAdjacentCells(int r, int c) {
 }
 
 map<pair<int, int>, vector<Rabbit*>> movementPlans;
+mutex mtx;
 
 void World::planRabbitMovements() {
     movementPlans.clear();
 
-    for (Rabbit* rabbit : rabbits) {
-        int r = rabbit->getRow();
-        int c = rabbit->getCol();
+    int total = rabbits.size();
+    int num_threads = 0;
 
-        auto options = getFreeAdjacentCells(r, c);
-        int P = options.size();  
-        // cout << "Rabbit at (" << r << "," << c << ") has " << options.size() << " options." << endl;
-        // cout << "AGE: "<<rabbit->getAge() << endl;
-        if (!options.empty()) {
-            int destIndex = (getGeneration() + r + c) % P;
-            auto dest = options[destIndex];
-            movementPlans[dest].push_back(rabbit);
+    // Vector de mapas locales por hilo
+    std::vector<std::map<std::pair<int, int>, std::vector<Rabbit*>>> localPlans;
+
+    #pragma omp parallel
+    {
+        int tid = omp_get_thread_num();
+
+        #pragma omp single
+        {
+            num_threads = omp_get_num_threads();
+            localPlans.resize(num_threads);
+            std::cout << "Usando " << num_threads << " hilos.\n";
         }
-        else{
-            movementPlans[{r, c}].push_back(rabbit);
+
+        #pragma omp for schedule(static)
+        for (int i = 0; i < total; ++i) {
+            Rabbit* rabbit = rabbits[i];
+            int r = rabbit->getRow();
+            int c = rabbit->getCol();
+
+            std::cout << "[Hilo " << tid << "] Rabbit en (" << r << "," << c << ")\n";
+
+            auto options = getFreeAdjacentCells(r, c);
+            int P = options.size();
+
+            if (!options.empty()) {
+                int destIndex = (getGeneration() + r + c) % P;
+                auto dest = options[destIndex];
+                localPlans[tid][dest].push_back(rabbit);
+                std::cout << "[Hilo " << tid << "] Rabbit va a (" << dest.first << "," << dest.second << ")\n";
+            } else {
+                localPlans[tid][{r, c}].push_back(rabbit);
+                std::cout << "[Hilo " << tid << "] Rabbit se queda en (" << r << "," << c << ")\n";
+            }
         }
     }
+
+    // Combinar todos los mapas locales de forma segura con un mutex
+    for (int i = 0; i < num_threads; ++i) {
+        for (const auto& entry : localPlans[i]) {
+            lock_guard<mutex> lock(mtx);  
+            movementPlans[entry.first].insert(
+                movementPlans[entry.first].end(),
+                entry.second.begin(),
+                entry.second.end()
+            );
+        }
+    }
+
+    std::cout << "planRabbitMovements() terminado.\n";
 }
 
 void World::resolveRabbitMovements() {
@@ -154,35 +195,72 @@ vector<pair<int, int>> World::getAdjacentCellsWithRabbits(int r, int c) {
 }
 
 map<pair<int, int>, vector<Fox*>> foxMovementPlans;
+mutex foxMutex;
 
 void World::planFoxMovements() {
     foxMovementPlans.clear();
 
-    for (Fox* fox : foxes) {
-        int r = fox->getRow();
-        int c = fox->getCol();
+    int total = foxes.size();
+    int num_threads = 0;
 
-        auto rabbitCells = getAdjacentCellsWithRabbits(r, c);
-        if (!rabbitCells.empty()) {
-            int P = rabbitCells.size();
-            int destIndex = (getGeneration() + r + c) % P;
-            auto dest = rabbitCells[destIndex];
-            foxMovementPlans[dest].push_back(fox);
+    // Vector de mapas locales por hilo
+    std::vector<std::map<std::pair<int, int>, std::vector<Fox*>>> localFoxPlans;
+
+    #pragma omp parallel
+    {
+        int tid = omp_get_thread_num();
+
+        #pragma omp single
+        {
+            num_threads = omp_get_num_threads();
+            localFoxPlans.resize(num_threads);
+            std::cout << "Usando " << num_threads << " hilos.\n";
         }
-        else {
-            
-            auto emptyCells = getFreeAdjacentCells(r, c);
-            if (!emptyCells.empty()) {
-                int P = emptyCells.size();
+
+        #pragma omp for schedule(static)
+        for (int i = 0; i < total; ++i) {
+            Fox* fox = foxes[i];
+            int r = fox->getRow();
+            int c = fox->getCol();
+
+            std::cout << "[Hilo " << tid << "] Fox en (" << r << "," << c << ")\n";
+
+            auto rabbitCells = getAdjacentCellsWithRabbits(r, c);  
+            if (!rabbitCells.empty()) {
+                int P = rabbitCells.size();
                 int destIndex = (getGeneration() + r + c) % P;
-                auto dest = emptyCells[destIndex];
-                foxMovementPlans[dest].push_back(fox);
-            }
-            else{
-                foxMovementPlans[{r, c}].push_back(fox);
+                auto dest = rabbitCells[destIndex];
+                localFoxPlans[tid][dest].push_back(fox);
+                std::cout << "[Hilo " << tid << "] Fox va a (" << dest.first << "," << dest.second << ")\n";
+            } else {
+                auto emptyCells = getFreeAdjacentCells(r, c);  
+                if (!emptyCells.empty()) {
+                    int P = emptyCells.size();
+                    int destIndex = (getGeneration() + r + c) % P;
+                    auto dest = emptyCells[destIndex];
+                    localFoxPlans[tid][dest].push_back(fox);
+                    std::cout << "[Hilo " << tid << "] Fox va a (" << dest.first << "," << dest.second << ")\n";
+                } else {
+                    localFoxPlans[tid][{r, c}].push_back(fox);
+                    std::cout << "[Hilo " << tid << "] Fox se queda en (" << r << "," << c << ")\n";
+                }
             }
         }
     }
+
+    // Combinar todos los mapas locales de forma segura con un mutex
+    for (int i = 0; i < num_threads; ++i) {
+        for (const auto& entry : localFoxPlans[i]) {
+            std::lock_guard<std::mutex> lock(foxMutex);  
+            foxMovementPlans[entry.first].insert(
+                foxMovementPlans[entry.first].end(),
+                entry.second.begin(),
+                entry.second.end()
+            );
+        }
+    }
+
+    std::cout << "planFoxMovements() terminado.\n";
 }
 
 void World::resolveFoxMovements() {
